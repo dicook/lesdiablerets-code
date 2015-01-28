@@ -1,0 +1,490 @@
+Exploring the 2012 PISA data
+========================================================
+
+Data sources: http://www.oecd.org/pisa/pisaproducts/datavisualizationcontest.htm
+
+This is the code that will produce the plots in Di Cook's Les Diablerets seminar on Exploratory Data Analysis. 
+
+Load all the libraries that will generally be needed.
+
+```{r load_libraries, message=FALSE}
+library(stringr)
+library(reshape2)
+library(ggplot2)
+library(dplyr)
+library(lubridate)
+library(maps)
+library(ggmap)
+library(rworldmap)
+library (grid)    
+library (scales) 
+library(GGally)
+```
+
+Read in the data. You will need to get a copy of the .rda files from the OECD PISA web site. These files are large.
+
+```{r load_data, echo=FALSE, cache=FALSE}
+#setwd("PISA")
+sets <- c("item", "parent", "school", "scoredItem", "student")
+
+# function to build the file names
+fn_build <- function(file_name){
+ 
+  template <- c("2012.rda", "2012dict.rda")
+ 
+  file_name %>% 
+    vapply(str_join, template, template) %>% 
+    file.path(".", "data", .)
+}
+
+# load the data
+sets %>% fn_build %>% lapply(load, .GlobalEnv)
+
+# clean
+rm(fn_build, sets)
+```
+
+A little bit of convenience code for being able to sort through the variable definitions.
+
+```{r modify_dictionaries, echo=FALSE, cache=FALSE}
+# function to convert to data-frames
+fn_make_df <- function(named_vector){
+  data.frame(
+    variable = attr(named_vector, "names"),
+    description = named_vector,
+    row.names = NULL
+  )
+}
+
+# there's a clever way to do this, but beyond me for naw
+dict_item2012 <- fn_make_df(item2012dict) 
+dict_parent2012 <- fn_make_df(parent2012dict) 
+dict_school2012 <- fn_make_df(school2012dict) 
+dict_scoredItem2012 <- fn_make_df(scoredItem2012dict) 
+dict_student2012 <- fn_make_df(student2012dict) 
+
+# clean
+rm(fn_make_df)
+rm(item2012dict, parent2012dict, school2012dict, scoredItem2012dict, student2012dict)
+```
+
+Working with the maps, convenience functions.
+
+```{r usefulfn, echo=FALSE, cache=FALSE}
+extractPolygons <- function(shapes) {
+
+  dframe <- ldply(1:length(shapes@polygons), function(i) {
+    ob <- shapes@polygons[[i]]@Polygons
+    dframe <- ldply(1:length(ob), function(j) {
+      x <- ob[[j]]
+      co <- x@coords
+      data.frame(co, order=1:nrow(co), group=j)
+    })
+    dframe$region <- i
+    dframe$name <- shapes@polygons[[i]]@ID
+    dframe
+  })
+  # construct a group variable from both group and polygon:
+  dframe$group <- interaction(dframe$region, dframe$group)
+  
+  dframe
+}
+
+# To get a blank background on map
+new_theme_empty <- theme_bw()
+new_theme_empty$line <- element_blank()
+new_theme_empty$rect <- element_blank()
+new_theme_empty$strip.text <- element_blank()
+new_theme_empty$axis.text <- element_blank()
+new_theme_empty$plot.title <- element_blank()
+new_theme_empty$axis.title <- element_blank()
+new_theme_empty$plot.margin <- structure(c(0, 0, -1, -1), unit = "lines", valid.unit = 3L, class = "unit")
+```
+
+Take a quick browse through the size of the data to see what we have.
+
+```{r quicklook, fig.width=8, fig.height=8, warning=FALSE, message=FALSE, cache=FALSE}
+head(dict_student2012, 20)
+sort(table(student2012$CNT))
+unique(student2012$CNT)
+tail(dict_student2012, 5)
+x <- student2012[,c("CNT", "PV1MATH", "PV2MATH", "SENWGT_STU")]
+x$PV1MATH <- as.numeric(x$PV1MATH)
+x$PV2MATH <- as.numeric(x$PV2MATH)
+x$SENWGT_STU <- as.numeric(x$SENWGT_STU)
+morder <- summarise(group_by(x, CNT), mave=weighted.mean(PV1MATH, w=SENWGT_STU, na.rm=T))
+x$CNT <- factor(x$CNT, levels=morder$CNT[order(morder$mave)])
+qplot(PV1MATH, PV2MATH, data=x) + facet_wrap(~CNT) + theme(aspect.ratio=1)
+x <- student2012[student2012$CNT=="Switzerland",c("PV1MATH", "PV2MATH","PV3MATH","PV4MATH","PV5MATH")]
+ggpairs(x)
+```
+
+```{r cntnames, warning=FALSE, message=FALSE, cache=FALSE}
+colnames(student2012)[1] <- "name"
+#school2012$name <- as.character(school2012$name)
+#student2012$name <- as.character(student2012$name)
+
+fix_country = function(df) {
+df$name = as.character(df$name)
+df$name[df$name=="Serbia"] <- "Republic of Serbia"
+df$name[df$name=="Korea"] <- "South Korea"
+df$name[df$name=="Chinese Taipei"] <- "Taiwan"
+df$name[df$name=="Slovak Republic"] <- "Slovakia"
+df$name[df$name=="Russian Federation"] <- "Russia"
+df$name[df$name=="Perm(Russian Federation)"] <- "Russia"
+df$name[df$name=="Hong Kong-China"] <- "Hong Kong S.A.R."
+df$name[df$name=="China-Shanghai"] <- "China"
+df$name[df$name=="China-Macau"] <- "China"
+df$name[df$name=="Connecticut (USA)"] <- "United States of America"
+df$name[df$name=="Florida (USA)"] <- "United States of America"
+df$name[df$name=="Massachusetts (USA)"] <- "United States of America"
+
+df
+}
+
+shorten_countrynames = function(df) {
+df$name = as.character(df$name)
+df$name[df$name=="Hong Kong S.A.R."] <- "Hong Kong"
+df$name[df$name=="Republic of Serbia"] <- "Serbia"
+df$name[df$name=="United Arab Emirates"] <- "UAE"
+df$name[df$name=="United States of America"] <- "USA"
+df$name[df$name=="United Kingdom"] <- "UK"
+
+df
+}
+student2012 = fix_country(student2012)
+student2012 = shorten_countrynames(student2012)
+```
+
+Calculate summaries by gender.
+
+```{r dataprep, fig.width=8, fig.height=8, warning=FALSE, message=FALSE, cache=FALSE}
+student2012.sub <- student2012[, c(1, 12, 501, 541, 546, 551, 634)]
+colnames(student2012.sub)[1] <- "name"
+student2012.sub$PV1MATH <- as.numeric(student2012.sub$PV1MATH)
+student2012.sub$PV1READ <- as.numeric(student2012.sub$PV1READ)
+student2012.sub$PV1SCIE <- as.numeric(student2012.sub$PV1SCIE)
+student2012.sub$SENWGT_STU <- as.numeric(student2012.sub$SENWGT_STU)
+student2012.sub$W_FSTUWT <- as.numeric(student2012.sub$W_FSTUWT)
+# Set up country names to match map
+#student2012.sub$name <- as.character(student2012.sub$name)
+#student2012.sub$name[student2012.sub$name=="China-Shanghai"] <- "China"
+#student2012.sub$name[student2012.sub$name=="Macao-China"] <- "China"
+#student2012.sub$name[student2012.sub$name=="Chinese Taipei"] <- "Taiwan"
+#student2012.sub$name[student2012.sub$name=="Hong Kong-China"] <- "Hong Kong S.A.R."
+#student2012.sub$name[student2012.sub$name=="Hong Kong S.A.R."] <- "Hong Kong"
+#student2012.sub$name[student2012.sub$name=="Korea"] <- "South Korea"
+#student2012.sub$name[student2012.sub$name=="Russian Federation"] <- "Russia"
+#student2012.sub$name[student2012.sub$name=="Perm(Russian Federation)"] <- "Russia"
+#student2012.sub$name[student2012.sub$name=="Slovak Republic"] <- "Slovakia"
+#student2012.sub$name[student2012.sub$name=="Connecticut (USA)"] <- "United States of America"
+#student2012.sub$name[student2012.sub$name=="Florida (USA)"] <- "United States of America"
+#student2012.sub$name[student2012.sub$name=="Massachusetts (USA)"] <- "United States of America"
+#student2012.sub$name[student2012.sub$name=="United States of America"] <- "USA"
+
+student2012.sub.summary.gap <- summarise(group_by(student2012.sub, name), 
+                  mathgap=mean(PV1MATH[ST04Q01=="Male"], na.rm=T)-
+                          mean(PV1MATH[ST04Q01=="Female"], na.rm=T),
+                  wmathgap=weighted.mean(PV1MATH[ST04Q01=="Male"], w=SENWGT_STU[ST04Q01=="Male"], na.rm=T)-
+                          weighted.mean(PV1MATH[ST04Q01=="Female"], w=SENWGT_STU[ST04Q01=="Female"], na.rm=T),
+                  w2mathgap=weighted.mean(PV1MATH[ST04Q01=="Male"], w=W_FSTUWT[ST04Q01=="Male"], na.rm=T)-
+                          weighted.mean(PV1MATH[ST04Q01=="Female"], w=W_FSTUWT[ST04Q01=="Female"], na.rm=T),
+                  mtest.stat = t.test(PV1MATH[ST04Q01=="Male"], PV1MATH[ST04Q01=="Female"])$statistic, 
+                  mp.value = t.test(PV1MATH[ST04Q01=="Male"], PV1MATH[ST04Q01=="Female"])$p.value,
+                  readgap=mean(PV1READ[ST04Q01=="Male"], na.rm=T)-mean(PV1READ[ST04Q01=="Female"], na.rm=T),
+                  wreadgap=weighted.mean(PV1READ[ST04Q01=="Male"], w=SENWGT_STU[ST04Q01=="Male"], na.rm=T)-
+                          weighted.mean(PV1READ[ST04Q01=="Female"], w=SENWGT_STU[ST04Q01=="Female"], na.rm=T),
+                  rtest.stat = t.test(PV1READ[ST04Q01=="Male"], PV1READ[ST04Q01=="Female"])$statistic, 
+                  rp.value = t.test(PV1READ[ST04Q01=="Male"], PV1READ[ST04Q01=="Female"])$p.value,
+                  sciencegap=mean(PV1SCIE[ST04Q01=="Male"], na.rm=T)-mean(PV1SCIE[ST04Q01=="Female"], na.rm=T),
+                  wsciencegap=weighted.mean(PV1SCIE[ST04Q01=="Male"], w=SENWGT_STU[ST04Q01=="Male"], na.rm=T)-
+                          weighted.mean(PV1SCIE[ST04Q01=="Female"], w=SENWGT_STU[ST04Q01=="Female"], na.rm=T),
+                  stest.stat = t.test(PV1SCIE[ST04Q01=="Male"], PV1SCIE[ST04Q01=="Female"])$statistic, 
+                  sp.value = t.test(PV1SCIE[ST04Q01=="Male"], PV1SCIE[ST04Q01=="Female"])$p.value,                                         
+                  minmale=min(PV1MATH[ST04Q01=="Male"], na.rm=T), 
+                  minfemale=min(PV1MATH[ST04Q01=="Female"], na.rm=T), 
+                  maxmale=max(PV1MATH[ST04Q01=="Male"], na.rm=T), 
+                  maxfemale=max(PV1MATH[ST04Q01=="Female"], na.rm=T), 
+                  propmale=length(PV1MATH[ST04Q01=="Male"])/length(PV1MATH), 
+                  propfemale=length(PV1MATH[ST04Q01=="Female"])/length(PV1MATH))
+qplot(mathgap, wmathgap, data=student2012.sub.summary.gap, xlab="Mean Difference", ylab="Weighted Mean Difference",
+      xlim=c(-30,30), ylim=c(-30,30)) + geom_abline(slope=1) + theme(aspect.ratio=1)
+summary(student2012.sub.summary.gap$mathgap-student2012.sub.summary.gap$wmathgap)
+qplot(wmathgap, w2mathgap, data=student2012.sub.summary.gap, xlab="Senate Weighted Mean Difference", ylab="Final Student Weighted Mean",
+      xlim=c(-30,30), ylim=c(-30,30)) + geom_abline(slope=1) + theme(aspect.ratio=1)
+
+# Rough grouping by p-values
+student2012.sub.summary.gap$msig <- ifelse(student2012.sub.summary.gap$mp.value>0.05, "none", TRUE)
+student2012.sub.summary.gap$msig[student2012.sub.summary.gap$msig==TRUE&student2012.sub.summary.gap$mtest.stat>0] <- "male"
+student2012.sub.summary.gap$msig[student2012.sub.summary.gap$msig==TRUE&student2012.sub.summary.gap$mtest.stat<0] <- "female"
+student2012.sub.summary.gap$rsig <- ifelse(student2012.sub.summary.gap$rp.value>0.05, "none", TRUE)
+student2012.sub.summary.gap$rsig[student2012.sub.summary.gap$rsig==TRUE&student2012.sub.summary.gap$rtest.stat>0] <- "male"
+student2012.sub.summary.gap$rsig[student2012.sub.summary.gap$rsig==TRUE&student2012.sub.summary.gap$rtest.stat<0] <- "female"
+student2012.sub.summary.gap$ssig <- ifelse(student2012.sub.summary.gap$sp.value>0.05, "none", TRUE)
+student2012.sub.summary.gap$ssig[student2012.sub.summary.gap$ssig==TRUE&student2012.sub.summary.gap$stest.stat>0] <- "male"
+student2012.sub.summary.gap$ssig[student2012.sub.summary.gap$ssig==TRUE&student2012.sub.summary.gap$stest.stat<0] <- "female"
+
+# Extract map polygons for modern world
+world <- getMap(resolution = "low")
+library(plyr)
+world.polys <- extractPolygons(world)
+detach("package:plyr")
+# Check
+head(world.polys)
+sort(unique(world.polys$name))
+sort(unique(as.character(student2012$CNT)))
+sort(unique(as.character(student2012$CNT)))[!(sort(unique(as.character(student2012$CNT))) %in% sort(unique(world.polys$name)))]
+# Now add data
+#student2012.sub.summary.gap$name[student2012.sub.summary.gap$name=="Serbia"] <- "Republic of Serbia"
+world.polys$name[world.polys$name=="Republic of Serbia"] <- "Serbia"
+world.polys$name[world.polys$name=="United States of America"] <- "USA"
+world.polys$name[world.polys$name=="United Arab Emirates"] <- "UAE"
+world.polys$name[world.polys$name=="United Kingdom"] <- "UK"
+world.polys$name[world.polys$name=="Hong Kong S.A.R."] <- "Hong Kong"
+student2012.sub.map <- left_join(student2012.sub.summary.gap, world.polys)
+```
+
+```{r gendermath, fig.width=8, fig.height=12, warning=FALSE, message=FALSE, cache=FALSE}
+student2012.sub.summary.gap$name <- factor(student2012.sub.summary.gap$name, 
+      levels=student2012.sub.summary.gap$name[order(student2012.sub.summary.gap$mathgap)])
+qplot(name, mathgap, data=student2012.sub.summary.gap, size=I(5), color=msig) + 
+  xlab("") +
+  scale_colour_manual("Significant", values=c("male"="skyblue", "female"="pink", "none"="lightgreen")) +
+  scale_y_continuous("Math Score Gap", breaks=seq(-30, 30, 5), limits=c(-30,30)) + 
+   geom_hline(yintercept=0, colour="grey80") + coord_flip() + theme_bw() + theme(legend.position="bottom")
+# Test colors
+#qplot(name, mathgap, data=student2012.sub.summary.gap, size=propmale, color=msig) + 
+#  xlab("") +
+#  scale_colour_manual("Significant", values=c("male"=dichromat("skyblue"), "female"=dichromat("pink"), "none"=dichromat("lightgreen"))) +
+#  scale_y_continuous("Math Score Gap", breaks=seq(-30, 30, 5)) + 
+#  scale_size("Prop male") +
+#   geom_hline(yintercept=0, colour="grey80") + coord_flip() + theme_bw() + theme(legend.position="bottom")
+#ggsave("gendermathgap.pdf", width=7, height=14)
+student2012.sub.summary.gap$name <- factor(student2012.sub.summary.gap$name, 
+      levels=student2012.sub.summary.gap$name[order(student2012.sub.summary.gap$maxmale)])
+qplot(name, maxmale, data=student2012.sub.summary.gap, color=I("skyblue"), size=I(5)) + 
+  xlab("") +
+  geom_point(aes(y=maxfemale), colour="pink", size=I(5)) + 
+  scale_y_continuous("High Math") + coord_flip() + theme_bw()
+#ggsave("gendermathtop.pdf", width=3.5, height=7)
+student2012.sub.summary.gap$name <- factor(student2012.sub.summary.gap$name, 
+      levels=student2012.sub.summary.gap$name[order(student2012.sub.summary.gap$minfemale)])
+qplot(name, minmale, data=student2012.sub.summary.gap, color=I("skyblue"), size=I(5)) + 
+  xlab("") +
+  geom_point(aes(y=minfemale), colour="pink", size=I(5)) + 
+  scale_y_continuous("Low Math") + coord_flip() + theme_bw()
+#ggsave("gendermathbottom.pdf", width=3.5, height=7)
+#
+```
+
+```{r mathmap, fig.width=12, fig.height=7, warning=FALSE, message=FALSE, cache=FALSE}
+ggplot(data=world.polys) + geom_path(aes(x=X1, y=X2, order=order, group=group), colour=I("grey90")) + 
+  geom_polygon(data=student2012.sub.map, aes(x=X1, y=X2, order=order, group=group, fill=msig)) +
+  scale_fill_manual("Significant", values=c("male"="skyblue", "female"="pink", "none"="lightgreen")) +
+  new_theme_empty + theme(legend.position="none")
+```
+
+```{r genderread, fig.width=8, fig.height=12, warning=FALSE, message=FALSE, cache=FALSE}
+student2012.sub.summary.gap$name <- factor(student2012.sub.summary.gap$name, 
+      levels=student2012.sub.summary.gap$name[order(student2012.sub.summary.gap$readgap)])
+qplot(name, readgap, data=student2012.sub.summary.gap, color=rsig, size=I(5)) + 
+  xlab("") +
+  scale_colour_manual("Significant", values=c("male"="skyblue", "female"="pink", "none"="lightgreen")) +
+  scale_y_continuous("Reading Score Gap") + 
+   geom_hline(yintercept=0, colour="grey80") + coord_flip() + theme_bw() + theme(legend.position="none")
+#ggsave("genderreadgap.pdf", width=5, height=8)
+```
+
+```{r readmap, fig.width=12, fig.height=7, warning=FALSE, message=FALSE, cache=FALSE}
+#ggsave("gendermathmap.pdf", width=12, height=7)
+ggplot(data=world.polys) + geom_path(aes(x=X1, y=X2, order=order, group=group), colour=I("grey90")) + 
+  geom_polygon(data=student2012.sub.map, aes(x=X1, y=X2, order=order, group=group, fill=rsig)) +
+  scale_fill_manual("Significant", values=c("male"="skyblue", "female"="pink", "none"="lightgreen")) +
+  new_theme_empty + theme(legend.position="none")
+```
+
+```{r genderscience, fig.width=8, fig.height=12, warning=FALSE, message=FALSE, cache=FALSE}
+student2012.sub.summary.gap$name <- factor(student2012.sub.summary.gap$name, 
+      levels=student2012.sub.summary.gap$name[order(student2012.sub.summary.gap$sciencegap)])
+qplot(name, sciencegap, data=student2012.sub.summary.gap, color=ssig, size=I(5)) + 
+  xlab("") +
+  scale_colour_manual("Significant", values=c("male"="skyblue", "female"="pink", "none"="lightgreen")) +
+  scale_y_continuous("Science Score Gap") + 
+   geom_hline(yintercept=0, colour="grey80") + coord_flip() + theme_bw()
+#ggsave("gendergap.pdf", width=10, height=14)
+````
+
+```{r maps, fig.width=12, fig.height=7, warning=FALSE, message=FALSE, cache=FALSE}
+ggplot(data=world.polys) + geom_path(aes(x=X1, y=X2, order=order, group=group), colour=I("grey90")) + 
+  geom_polygon(data=student2012.sub.map, aes(x=X1, y=X2, order=order, group=group, fill=ssig)) +
+  scale_fill_manual("Significant", values=c("male"="skyblue", "female"="pink", "none"="lightgreen")) +
+  new_theme_empty + theme(legend.position="none")
+```
+
+```{r studying, fig.width=10, fig.height=12, echo = FALSE, message = FALSE, warning = FALSE, cache=FALSE}
+student.luke <- student2012[,c("CNT","PV1MATH","PV1READ","PV1SCIE","ST57Q01")]
+colnames(student.luke)[1] <- "name"
+#study.luke <- melt(student.luke,id=c("name","ST57Q01"))
+studyplot <- ggplot(data = student.luke, aes(ST57Q01, PV1MATH)) + xlab("Hours spent out of school studying per week") + ylab("Math score") + facet_wrap(~name) + stat_smooth(se=F)
+studyplot
+```
+
+
+```{r studyingbar, fig.width=4, fig.height=4, echo = FALSE, message = FALSE, warning = FALSE}
+studybar <- ggplot(data = student.luke, aes(ST57Q01) ) + geom_histogram(binwidth=5) + xlab("Hours spent studying")
+studybar
+```
+
+```{r truant, echo=FALSE, message = FALSE, warning = FALSE, cache=FALSE}
+#student2012$CNT = student2012$name
+student2012$OECD <- as.character(student2012$OECD)
+#student2012[student2012$name == "Albania", ]$OECD = "Albania"
+student2012$math = as.numeric(student2012[, "PV1MATH"])
+student2012$read = as.numeric(student2012[, "PV1READ"])
+student2012$sci = as.numeric(student2012[, "PV1SCIE"])
+
+student2012.sub = student2012 %>% dplyr::select(CNT, SCHOOLID, math, read, sci, OUTHOURS, STIDSTD, ST04Q01, ST11Q01, ST11Q02, ST15Q01, ST19Q01, ST26Q01, ST26Q02, ST26Q03, ST26Q04, ST26Q05, ST26Q06, ST26Q07, ST26Q08, ST26Q09, ST26Q10, ST26Q11, ST26Q12, ST26Q13, ST26Q14, ST27Q01, ST27Q02, ST27Q03, ST27Q04, ST27Q05, ST28Q01, OECD)
+colnames(student2012.sub)[1] <- "name"
+
+for (i in 13:26) {
+    student2012.sub[, i] <- as.character(student2012.sub[, i])
+    student2012.sub[is.na(student2012.sub[, i]), i] <- ""
+    student2012.sub[student2012.sub[, i] == "Yes", i] <- "1"
+    student2012.sub[student2012.sub[, i] == "No", i] <- "0"
+    student2012.sub[, i] <- as.numeric(student2012.sub[, i])
+}
+for (i in 27:31) {
+    student2012.sub[, i] <- as.character(student2012.sub[, i])
+    student2012.sub[is.na(student2012.sub[, i]), i] <- ""
+    student2012.sub[student2012.sub[, i] == "None", i] <- "0"
+    student2012.sub[student2012.sub[, i] == "One", i] <- "1"
+    student2012.sub[student2012.sub[, i] == "Two", i] <- "2"
+    student2012.sub[student2012.sub[, i] == "Three or more", i] <- "3"
+    student2012.sub[, i] <- as.numeric(student2012.sub[, i])
+}
+student2012.sub[, 32] <- as.character(student2012.sub[, 32])
+student2012.sub[is.na(student2012.sub[,32]), 32] <- ""
+student2012.sub[student2012.sub[, 32] == "0-10 books ", 32] <- "0"
+student2012.sub[student2012.sub[, 32] == "11-25 books ", 32] <- "1"
+student2012.sub[student2012.sub[, 32] == "26-100 books ", 32] <- "2"
+student2012.sub[student2012.sub[, 32] == "101-200 books ", 32] <- "3"
+student2012.sub[student2012.sub[, 32] == "201-500 books ", 32] <- "4"
+student2012.sub[student2012.sub[, 32] == "More than 500 books", 32] <- "5"
+student2012.sub[, 32] <- as.numeric(student2012.sub[, 32])
+
+#aggregate possessions
+student2012.sub$numposs <- apply(student2012.sub[, 13:26], 1, sum, na.rm = T)
+student2012.sub$numedposs <- apply(student2012.sub[, 27:31], 1, sum, na.rm = T)
+```
+
+```{r par_athomebar, fig.width=4, fig.height=4, echo = FALSE, message = FALSE, warning = FALSE, cache=FALSE}
+athome = student2012[,c("CNT", "SCHOOLID", "STIDSTD", "OECD", "PV1MATH", "PV1SCIE", "PV1READ","ST11Q01", "ST11Q02", "ST11Q03","ST11Q04", "ST11Q05", "ST11Q06")]
+colnames(athome)[1] <- "name"
+athome = athome %>% filter(!is.na(athome$ST11Q01) & !is.na(athome$ST11Q02))
+athome$parents = NA
+athome[athome$ST11Q01 == "Yes" & athome$ST11Q02 == "Yes", ]$parents = "Both"
+athome[athome$ST11Q01 == "Yes" & athome$ST11Q02 == "No", ]$parents = "Mother"
+athome[athome$ST11Q01 == "No" & athome$ST11Q02 == "Yes", ]$parents = "Father"
+athome[athome$ST11Q01 == "No" & athome$ST11Q02 == "No", ]$parents = "Neither"
+athome$parents <- factor(athome$parents, levels=c("Both", "Mother", "Father", "Neither"))
+#athome$name <- reorder(athome$name,athome$PV1MATH,mean, decreasing=F)
+pbarhome <- qplot(x = parents, data = athome, xlab="Parents in home") 
+pbarhome
+```
+
+```{r par_athome, fig.width=12, fig.height=12, echo = FALSE, message = FALSE, warning = FALSE, cache=FALSE}
+phome <- qplot(x = parents, y = PV1MATH, geom = "boxplot", outlier.size = 1, data = athome) + ylab("Math score") + facet_wrap(~name, scales="free_y") + scale_x_discrete("Family structure", labels=c("Mother"="M", "Father"="F", "Both"="B", "Neither"="N")) 
+phome
+```
+
+```{r poss, echo=FALSE, message = FALSE, warning = FALSE, cache=FALSE}
+#student2012$CNT = student2012$name
+student2012$OECD <- as.character(student2012$OECD)
+#student2012[student2012$name == "Albania", ]$OECD = "Albania"
+student2012$math = as.numeric(student2012[, "PV1MATH"])
+student2012$read = as.numeric(student2012[, "PV1READ"])
+student2012$sci = as.numeric(student2012[, "PV1SCIE"])
+
+student2012.sub = student2012 %>% dplyr::select(CNT, SCHOOLID, math, read, sci, OUTHOURS, STIDSTD, ST04Q01, ST11Q01, ST11Q02, ST15Q01, ST19Q01, ST26Q01, ST26Q02, ST26Q03, ST26Q04, ST26Q05, ST26Q06, ST26Q07, ST26Q08, ST26Q09, ST26Q10, ST26Q11, ST26Q12, ST26Q13, ST26Q14, ST27Q01, ST27Q02, ST27Q03, ST27Q04, ST27Q05, ST28Q01, OECD)
+colnames(student2012.sub)[1] <- "name"
+
+for (i in 13:26) {
+    student2012.sub[, i] <- as.character(student2012.sub[, i])
+    student2012.sub[is.na(student2012.sub[, i]), i] <- ""
+    student2012.sub[student2012.sub[, i] == "Yes", i] <- "1"
+    student2012.sub[student2012.sub[, i] == "No", i] <- "0"
+    student2012.sub[, i] <- as.numeric(student2012.sub[, i])
+}
+for (i in 27:31) {
+    student2012.sub[, i] <- as.character(student2012.sub[, i])
+    student2012.sub[is.na(student2012.sub[, i]), i] <- ""
+    student2012.sub[student2012.sub[, i] == "None", i] <- "0"
+    student2012.sub[student2012.sub[, i] == "One", i] <- "1"
+    student2012.sub[student2012.sub[, i] == "Two", i] <- "2"
+    student2012.sub[student2012.sub[, i] == "Three or more", i] <- "3"
+    student2012.sub[, i] <- as.numeric(student2012.sub[, i])
+}
+student2012.sub[, 32] <- as.character(student2012.sub[, 32])
+student2012.sub[is.na(student2012.sub[,32]), 32] <- ""
+student2012.sub[student2012.sub[, 32] == "0-10 books ", 32] <- "0"
+student2012.sub[student2012.sub[, 32] == "11-25 books ", 32] <- "1"
+student2012.sub[student2012.sub[, 32] == "26-100 books ", 32] <- "2"
+student2012.sub[student2012.sub[, 32] == "101-200 books ", 32] <- "3"
+student2012.sub[student2012.sub[, 32] == "201-500 books ", 32] <- "4"
+student2012.sub[student2012.sub[, 32] == "More than 500 books", 32] <- "5"
+student2012.sub[, 32] <- as.numeric(student2012.sub[, 32])
+
+#aggregate possessions
+student2012.sub$numposs <- apply(student2012.sub[, 13:26], 1, sum, na.rm = T)
+student2012.sub$numedposs <- apply(student2012.sub[, 27:31], 1, sum, na.rm = T)
+```
+
+```{r albania-possessions, fig.width=10, fig.height=12, echo = FALSE, message = FALSE, warning = FALSE, cache=FALSE}
+#df = melt(student2012.sub %>% group_by(name, numposs, OECD) %>% summarise(mmath = mean(math), msci = mean(sci), mread = mean(read)), id=c("name", "numposs", "OECD"))
+df = melt(student2012.sub %>% group_by(name, numposs, OECD) %>% summarise(mmath = mean(math)), id=c("name", "numposs", "OECD"))
+
+#df$group = paste0(df$name, df$variable)
+#qplot(x = numposs, y = value, data = df, facets = ~OECD, geom = "line", color = variable, group = group) + ylab("test scores") + xlab("number of possessions") + scale_colour_discrete(name = "Subject", labels=c("Math", "Science", "Reading"))
+qplot(x = numposs, y = value, data = df, facets = ~name, geom = "line") + ylab("Math score") + xlab("Number of possessions") + theme_bw()
+```
+
+```{r}
+# Internet use
+student2012dict[307:323]
+nm <- unlist(strsplit(student2012dict[307:323]," - "))[seq(2, 34, 2)]
+ch.internet <- student2012[student2012$CNT=="Switzerland",307:323]
+colnames(ch.internet) <- nm
+sort(apply(ch.internet, 2, mean, na.rm=T))
+recode.manually <- function(x){
+  x <- as.character(x)
+  x[x=="Never or hardly ever"] <- 0
+  x[x=="Once or twice a month"] <- 1
+  x[x=="Once or twice a week"] <- 2
+  x[x=="Almost every day"] <- 3
+  x[x=="Every day"] <- 4
+  as.numeric(x)
+}
+for (i in 1:ncol(ch.internet)) 
+  ch.internet[,i] <- recode.manually(ch.internet[,i])
+ch.internet.m <- melt(ch.internet)
+ch.internet.m.ave <- summarise(group_by(ch.internet.m, variable), av = mean(value, na.rm=T))
+ch.internet.m.ave$variable <- factor(ch.internet.m.ave$variable, levels=ch.internet.m.ave$variable[order(ch.internet.m.ave$av)])
+qplot(variable, av, data=ch.internet.m.ave, size=I(5), ylab="Average usage", xlab="", ylim=c(0,4)) + coord_flip()
+```
+
+```{r}
+student2012.sub <- student2012[, c(1, 62, 501)]
+colnames(student2012.sub)[2] <- "TVs"
+colnames(student2012.sub)[3] <- "math"
+student2012.sub <- student2012.sub[!is.na(student2012.sub[,2]),]
+student2012.sub[, 2] <- as.character(student2012.sub[, 2])
+student2012.sub[student2012.sub[, 2] == "None", 2] <- 0
+student2012.sub[student2012.sub[, 2] == "One", 2] <- 1
+student2012.sub[student2012.sub[, 2] == "Two", 2] <- 2
+student2012.sub[student2012.sub[, 2] == "Three or more", 2] <- 3
+student2012.sub[, 2] <- as.numeric(student2012.sub[, 2])
+df <- student2012.sub %>% group_by(name, TVs) %>% summarise(mmath = mean(math))
+df2 <- df %>% group_by(name) %>% summarise(diff = mmath[TVs==0]-mmath[TVs==3])
+df$name <- factor(df$name, levels=unique(df$name)[order(df2$diff)])
+qplot(TVs, mmath, data=df, geom="line", ylab="Average math score") + facet_wrap(~name, ncol=8) + theme_bw()
+```
